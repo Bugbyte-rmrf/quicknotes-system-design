@@ -310,3 +310,97 @@ For stronger disaster recovery, maintain backups outside the primary region and 
 This architecture separates user-facing delivery, API processing, caching, persistent storage, and background work. Load balancing and redundant application servers improve availability, while database backups and recovery procedures protect data. Caching and read replicas can improve read performance, but they require careful consistency and failure-handling decisions.
 
 The design should be validated through load testing, security testing, monitoring, and recovery exercises before production use.
+
+## Completing the POST /notes Request Flow
+
+After the application server validates the incoming request and confirms that the user is authorized, it sends the new note to the primary database. The database creates the record and returns the saved note, including its unique ID and timestamps.
+
+The application server then:
+
+1. Confirms that the database transaction completed successfully.
+2. Invalidates any cached note lists or cached data affected by the new note.
+3. Publishes optional background work to a durable queue if additional processing is required, such as notifications or analytics.
+4. Returns an HTTP `201 Created` response containing the newly created note and a `Location` header identifying the new resource.
+
+The frontend receives the response, updates the displayed note list, and informs the user that the note was created successfully. If validation fails, the API returns `400 Bad Request`; if authentication or authorization fails, it returns `401 Unauthorized` or `403 Forbidden`. Unexpected server or database failures return an appropriate `500 Internal Server Error` or other suitable server error without exposing sensitive implementation details.
+
+If a request fails after the client sends it, the client should avoid blindly retrying a non-idempotent create request. For production use, an idempotency key can help prevent duplicate notes when a client retries after an uncertain network failure.
+
+## Architectural Trade-Offs
+
+### 1. Read Replicas: Performance vs. Read-After-Write Consistency
+
+**Decision:** Route most read requests to database replicas while directing writes to the primary database.
+
+**Benefits:**
+- Distributes read traffic across multiple database servers.
+- Reduces pressure on the primary database.
+- Improves read throughput as the number of users grows.
+
+**Trade-offs and risks:**
+- Replicas may lag behind the primary database.
+- A user may create a note and not immediately see it in a subsequent read served by a replica.
+- Replication and failover add operational complexity.
+
+**Mitigation:** Use the primary database for read-after-write operations when immediate consistency is required. For ordinary reads, allow replicas to serve requests where slight delays are acceptable. Monitor replication lag and route reads away from unhealthy or excessively delayed replicas.
+
+### 2. Caching: Lower Latency vs. Data Freshness
+
+**Decision:** Cache frequently requested note lists and other suitable read results to reduce database load.
+
+**Benefits:**
+- Reduces response times for common read requests.
+- Decreases repeated queries to the database.
+- Helps the system support high traffic more efficiently.
+
+**Trade-offs and risks:**
+- Cached results may become stale after a note is created, updated, or deleted.
+- Cache invalidation adds complexity.
+- A cache outage can increase database traffic sharply.
+
+**Mitigation:** Invalidate or update affected cache entries after successful writes, use appropriate expiration times, and monitor cache health. If the cache becomes unavailable, allow the application to fall back to the database, with rate limiting and capacity safeguards to prevent overload.
+
+## Eliminating Single Points of Failure
+
+The system should avoid relying on any single server or component whose failure would make the entire service unavailable.
+
+### Load Balancer
+
+- Use a managed or redundant load-balancing service with health checks.
+- Route traffic only to healthy application instances.
+- Configure the infrastructure so that a single load-balancer instance or availability-zone failure does not take down the service.
+- Monitor request failures, latency, and backend health.
+
+### Application Tier
+
+- Run at least two application instances across separate failure domains or availability zones.
+- Keep application servers stateless where practical so that requests can be handled by any healthy instance.
+- Automatically replace failed instances and scale capacity based on demand.
+- Use timeouts, bounded retries, and circuit breakers for dependencies to prevent cascading failures.
+
+### Primary Database
+
+- Use automated backups and point-in-time recovery.
+- Configure a tested high-availability failover mechanism with a standby or managed database service.
+- Replicate data to a standby in a separate failure domain where supported.
+- Monitor database health, storage capacity, replication status, and connection usage.
+- Regularly test recovery procedures and document the recovery-time and recovery-point objectives.
+
+A primary database remains a critical dependency for writes, so replication alone is not sufficient. Automated failover, recoverable backups, and tested restoration procedures are required to reduce downtime and data-loss risk.
+
+### Replicas, Cache, and Background Workers
+
+- Configure read replicas so that unhealthy replicas can be removed from read routing, with fallback to the primary when capacity permits.
+- Make the cache optional for correctness: if it fails, the application should still be able to serve requests from the database when safe to do so.
+- Use a durable message queue for background jobs, with retry policies, dead-letter handling, and monitoring.
+- Make background jobs safe to retry to avoid duplicate side effects.
+- Apply backpressure and capacity limits during dependency outages.
+
+### Monitoring and Recovery
+
+- Collect centralized logs, metrics, and distributed traces.
+- Alert on elevated error rates, high latency, database saturation, replication lag, and failed health checks.
+- Test failure scenarios through controlled recovery exercises.
+- Maintain documented incident-response and disaster-recovery procedures.
+
+These measures reduce the impact of individual component failures. They do not guarantee zero downtime; resilience depends on implementation, capacity planning, monitoring, and regular testing.
