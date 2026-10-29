@@ -178,6 +178,81 @@ The application must ensure that the response contains only notes the authentica
 
 If saving the note fails, the API should return an appropriate error response instead of reporting success.
 
+## Completing the POST /notes Request Flow
+
+After the application validates the request and saves the new note to the primary database:
+
+1. The database returns the newly created note, including its generated ID and timestamps.
+2. The application invalidates or updates relevant cache entries so that future reads do not return stale note data.
+3. If background work is needed, such as sending a notification, the application publishes a job to the queue.
+4. The application returns `201 Created`, including the created note in the JSON response and a `Location` header identifying the new resource.
+5. The browser displays the new note to the user.
+
+If validation fails, the API returns an appropriate `4xx` response. If an unexpected server or database error occurs, the API returns a safe error response and logs diagnostic information without exposing secrets.
+
+## Architecture Trade-Offs
+
+### 1. Caching vs. Data Consistency
+
+**Benefit:** Caching frequently accessed notes reduces database reads and can improve response times.
+
+**Trade-off:** Cached information may become outdated after a note is updated or deleted.
+
+**Decision:** Cache only suitable read-heavy data and define clear invalidation rules. The primary database remains the authoritative source of data.
+
+### 2. Read Replicas vs. Immediate Consistency
+
+**Benefit:** Read replicas distribute read traffic and reduce the workload on the primary database.
+
+**Trade-off:** Replication may be delayed, so a read from a replica might not immediately reflect a recent write.
+
+**Decision:** Send writes to the primary database. Use the primary for reads that require immediate consistency, and use replicas for suitable read-heavy queries.
+
+### 3. Background Queues vs. Operational Complexity
+
+**Benefit:** Queues allow slow tasks, such as sending email notifications, to run outside the main API request.
+
+**Trade-off:** Queues and workers introduce more components to monitor, retry, and maintain.
+
+**Decision:** Use background processing for tasks that do not need to finish before the API responds. Make jobs safe to retry and handle duplicate processing.
+
+## Preventing and Handling Single Points of Failure
+
+A single point of failure is a component whose failure can make all or part of the service unavailable.
+
+### Application Servers
+
+Run at least two application server instances behind a load balancer. Configure health checks so unhealthy instances are removed from service. Deploy updates gradually to reduce the chance of all instances failing together.
+
+### Load Balancer
+
+Use a managed or redundant load-balancing service with health checks and failover. Avoid relying on a single manually maintained load-balancer instance.
+
+### Primary Database
+
+The primary database is a critical dependency. Use automated backups, point-in-time recovery where supported, monitoring, and a tested failover procedure. A healthy replica can be promoted if the primary fails, but the procedure must account for replication lag and possible data loss.
+
+### Read Replica
+
+If a read replica fails, route eligible read queries to another healthy replica or temporarily to the primary database, provided the primary has sufficient capacity. Monitor replication lag and avoid using a replica for reads that require immediate consistency.
+
+### Cache
+
+If the cache becomes unavailable, the application should fall back to the database where practical. Because this can increase database traffic, configure timeouts, connection limits, monitoring, and capacity safeguards.
+
+### Queue and Background Workers
+
+Use durable queues where appropriate, monitor queue depth, and retry transient failures. Send repeatedly failing jobs to a dead-letter queue for investigation. The API should not report a core operation as successful unless the required database write has succeeded.
+
+### Regional Outage and Data Recovery
+
+Keep backups separate from the primary production environment and, where required, in another region. Document and regularly test restoration and disaster-recovery procedures. Multi-region failover can improve resilience but adds cost and operational complexity.
+
+## Conclusion
+
+This architecture uses redundant application servers, health checks, database backups, replication, caching, and background processing to improve performance and reliability. These components also introduce trade-offs involving consistency, cost, and operational complexity. Load testing, security testing, monitoring, and recovery exercises should be completed before the system is used in production.
+
+
 ## 8. Architecture Trade-Offs
 
 ### Trade-off 1: Cache vs. data consistency
